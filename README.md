@@ -1,6 +1,6 @@
 # 致密度和热导率预测模型
 
-这个项目用于根据 11 类工艺/材料特征，自动选择合适特征，并同时预测两个目标变量：`致密度` 和 `热导率`。
+这个项目用于根据工艺/材料特征，自动选择合适特征，并预测指定目标变量：`致密度` 或 `热导率`。
 
 ## 数据格式
 
@@ -16,11 +16,13 @@
 - `烧结时间6`
 - `加压压力2`
 - `加压温度2`
+- `保压时间2`
 - `金刚石粒径`
+- `金刚石体积分数`
 - `致密度`
 - `热导率`
 
-特征列可以缺失，脚本会自动用 `0` 填补，并增加“是否缺失”的信息辅助模型学习。`致密度` 或 `热导率` 缺失的行会被排除，因为这些行无法用于监督训练。
+特征列可以缺失，脚本会自动用 `0` 填补，并增加“是否缺失”的信息辅助模型学习。当前选择的预测目标缺失的行会被排除，因为这些行无法用于监督训练。
 
 脚本会尽量从文本中提取数字，例如 `98%`、`98.5 %`、`120 W/mK` 这类内容会被识别为数值。如果清洗后没有有效目标值，脚本会提示原始行数和目标列缺失数量。
 
@@ -35,20 +37,27 @@ pip install -r requirements.txt
 把数据表放到当前目录，例如 `data.xlsx`，然后运行：
 
 ```bash
-python train_prediction_model.py --data data.xlsx
+python train_prediction_model.py --data data.xlsx --target 致密度
+```
+
+如果要预测热导率：
+
+```bash
+python train_prediction_model.py --data data.xlsx --target 热导率
 ```
 
 也可以指定输出目录：
 
 ```bash
-python train_prediction_model.py --data data.xlsx --output-dir model_output
+python train_prediction_model.py --data data.xlsx --target 致密度 --output-dir model_output
 ```
 
 ## 输出结果
 
 训练完成后会生成：
 
-- `model_output/best_model.joblib`：最终模型文件
+- `model_output/致密度_best_model.joblib`：致密度最终模型文件
+- `model_output/热导率_best_model.joblib`：热导率最终模型文件
 
 数据会按 `8:1:1` 划分为训练集、验证集、测试集。脚本会在验证集上从以下机器学习模型中选择表现最好的模型：
 
@@ -56,7 +65,7 @@ python train_prediction_model.py --data data.xlsx --output-dir model_output
 - `ExtraTrees`：极端随机树
 - `XGBoost`：梯度提升树模型
 
-脚本会直接在控制台输出每个候选模型的验证集达标率，并输出最终最佳模型在 `致密度` 和 `热导率` 上的达标率。达标规则为：
+脚本会直接在控制台输出每个候选模型的验证集达标率，并输出最终最佳模型在当前预测目标上的达标率。达标规则为：
 
 - `致密度`：预测误差 `<= 1%` 算达标。如果数据用 `0.98` 表示 `98%`，脚本会自动使用 `0.01` 作为阈值；如果数据用 `98` 表示 `98%`，脚本会自动使用 `1.0` 作为阈值。
 - `热导率`：预测误差 `<= 5 W/mK` 算达标。

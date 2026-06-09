@@ -7,7 +7,6 @@ import pandas as pd
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
 from sklearn.feature_selection import SelectFromModel
 from sklearn.impute import SimpleImputer
-from sklearn.multioutput import MultiOutputRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
@@ -25,10 +24,14 @@ FEATURE_COLUMNS = [
     "烧结时间6",
     "加压压力2",
     "加压温度2",
+    "保压时间2",
     "金刚石粒径",
+    "金刚石体积分数",
 ]
 
 TARGET_COLUMNS = ["致密度", "热导率"]
+DENSITY_PERCENT_TOLERANCE = 1.0
+DENSITY_DECIMAL_TOLERANCE = 0.01
 THERMAL_CONDUCTIVITY_TOLERANCE = 20.0
 
 
@@ -56,8 +59,8 @@ def read_table(path: Path) -> pd.DataFrame:
     raise ValueError("只支持 .csv、.xlsx、.xls 数据表")
 
 
-def validate_columns(df: pd.DataFrame) -> None:
-    missing = [col for col in FEATURE_COLUMNS + TARGET_COLUMNS if col not in df.columns]
+def validate_columns(df: pd.DataFrame, target: str) -> None:
+    missing = [col for col in FEATURE_COLUMNS + [target] if col not in df.columns]
     if missing:
         raise ValueError(f"数据表缺少列: {missing}")
 
@@ -77,14 +80,13 @@ def clean_numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
     return cleaned
 
 
-def validate_sample_count(x: pd.DataFrame, y: pd.DataFrame, raw_rows: int) -> None:
-    valid_targets = ~y.isna().any(axis=1)
+def validate_sample_count(y: pd.Series, raw_rows: int, target: str) -> None:
+    valid_targets = ~y.isna()
     valid_rows = int(valid_targets.sum())
     if valid_rows == 0:
-        target_missing = y.isna().sum().to_dict()
         raise ValueError(
-            "清洗后没有可用于训练的样本。请检查 `致密度` 和 `热导率` 两列是否有数值。"
-            f" 原始行数: {raw_rows}; 目标列无法识别/缺失数量: {target_missing}"
+            f"清洗后没有可用于训练 `{target}` 的样本。请检查该列是否有数值。"
+            f" 原始行数: {raw_rows}; `{target}` 无法识别/缺失数量: {int(y.isna().sum())}"
         )
     if valid_rows < 10:
         raise ValueError(
@@ -129,17 +131,15 @@ def build_candidates(random_state: int) -> dict[str, Pipeline]:
                 ("selector", make_selector(random_state)),
                 (
                     "model",
-                    MultiOutputRegressor(
-                        XGBRegressor(
-                            n_estimators=2000,
-                            learning_rate=0.03,
-                            max_depth=3,
-                            subsample=0.8,
-                            colsample_bytree=0.8,
-                            objective="reg:squarederror",
-                            random_state=random_state,
-                            n_jobs=-1,
-                        )
+                    XGBRegressor(
+                        n_estimators=2000,
+                        learning_rate=0.03,
+                        max_depth=3,
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        objective="reg:squarederror",
+                        random_state=random_state,
+                        n_jobs=-1,
                     ),
                 ),
             ]
@@ -149,49 +149,35 @@ def build_candidates(random_state: int) -> dict[str, Pipeline]:
 
 def get_target_tolerance(target: str, y_true: pd.Series) -> float:
     if target == "致密度":
-        return 0.02 if y_true.max() <= 1.5 else 2.0
+        return DENSITY_DECIMAL_TOLERANCE if y_true.max() <= 1.5 else DENSITY_PERCENT_TOLERANCE
     if target == "热导率":
         return THERMAL_CONDUCTIVITY_TOLERANCE
     raise ValueError(f"未知目标列: {target}")
 
 
-def evaluate(model: Pipeline, x: pd.DataFrame, y: pd.DataFrame) -> dict:
+def evaluate(model: Pipeline, x: pd.DataFrame, y: pd.Series, target: str) -> dict:
     pred = model.predict(x)
+    error = np.abs(y.to_numpy() - pred)
+    tolerance = get_target_tolerance(target, y)
+    pass_rate = float(np.mean(error <= tolerance))
     metrics = {
-        "overall": {
-            "mae": float(mean_absolute_error(y, pred)),
-            "rmse": float(np.sqrt(mean_squared_error(y, pred))),
-            "pass_rate": 0.0,
-        },
-        "by_target": {},
+        "target": target,
+        "mae": float(mean_absolute_error(y, pred)),
+        "rmse": float(np.sqrt(mean_squared_error(y, pred))),
+        "tolerance": tolerance,
+        "pass_rate": pass_rate,
     }
-    pass_rates = []
-    for idx, target in enumerate(TARGET_COLUMNS):
-        error = np.abs(y.iloc[:, idx].to_numpy() - pred[:, idx])
-        tolerance = get_target_tolerance(target, y.iloc[:, idx])
-        pass_rate = float(np.mean(error <= tolerance))
-        pass_rates.append(pass_rate)
-        metrics["by_target"][target] = {
-            "mae": float(mean_absolute_error(y.iloc[:, idx], pred[:, idx])),
-            "rmse": float(np.sqrt(mean_squared_error(y.iloc[:, idx], pred[:, idx]))),
-            "tolerance": tolerance,
-            "pass_rate": pass_rate,
-        }
-    metrics["overall"]["pass_rate"] = float(np.mean(pass_rates))
     return metrics
 
 
 def print_metrics(title: str, metrics: dict) -> None:
     print(f"\n{title}")
-    for target in TARGET_COLUMNS:
-        target_metrics = metrics["by_target"][target]
-        print(
-            f"{target}达标率: {target_metrics['pass_rate'] * 100:.2f}% | "
-            f"达标误差阈值: {target_metrics['tolerance']:.4f} | "
-            f"MAE: {target_metrics['mae']:.4f} | "
-            f"RMSE: {target_metrics['rmse']:.4f}"
-        )
-    print(f"整体达标率: {metrics['overall']['pass_rate'] * 100:.2f}%")
+    print(
+        f"{metrics['target']}达标率: {metrics['pass_rate'] * 100:.2f}% | "
+        f"达标误差阈值: {metrics['tolerance']:.4f} | "
+        f"MAE: {metrics['mae']:.4f} | "
+        f"RMSE: {metrics['rmse']:.4f}"
+    )
 
 
 def get_selected_features(model: Pipeline) -> list[str]:
@@ -208,8 +194,9 @@ def get_selected_features(model: Pipeline) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="训练致密度和热导率预测模型")
+    parser = argparse.ArgumentParser(description="训练单目标预测模型")
     parser.add_argument("--data", required=True, help="数据表路径，支持 csv/xlsx/xls")
+    parser.add_argument("--target", required=True, choices=TARGET_COLUMNS, help="预测目标：致密度 或 热导率")
     parser.add_argument("--output-dir", default="model_output", help="模型和报告输出目录")
     parser.add_argument("--random-state", type=int, default=42)
     args = parser.parse_args()
@@ -220,14 +207,14 @@ def main() -> None:
 
     df = read_table(data_path)
     df.columns = df.columns.astype(str).str.strip()
-    validate_columns(df)
+    validate_columns(df, args.target)
 
     # 目标值缺失的样本无法监督训练；特征缺失用 0 填补，并保留缺失指示列。
     raw_rows = len(df)
     x = clean_numeric_frame(df[FEATURE_COLUMNS])
-    y = clean_numeric_frame(df[TARGET_COLUMNS])
-    validate_sample_count(x, y, raw_rows)
-    keep = ~y.isna().any(axis=1)
+    y = clean_numeric_frame(df[[args.target]])[args.target]
+    validate_sample_count(y, raw_rows, args.target)
+    keep = ~y.isna()
     x = x.loc[keep]
     y = y.loc[keep]
 
@@ -253,8 +240,8 @@ def main() -> None:
 
     for name, model in candidates.items():
         model.fit(x_train, y_train)
-        val_metrics = evaluate(model, x_val, y_val)
-        score = val_metrics["overall"]["pass_rate"]
+        val_metrics = evaluate(model, x_val, y_val, args.target)
+        score = val_metrics["pass_rate"]
         candidate_scores.append((name, score))
         if score > best_score:
             best_name = name
@@ -264,11 +251,13 @@ def main() -> None:
 
     assert best_name is not None and best_model is not None and best_val_metrics is not None
 
-    test_metrics = evaluate(best_model, x_test, y_test)
+    test_metrics = evaluate(best_model, x_test, y_test, args.target)
     selected_features = get_selected_features(best_model)
 
-    joblib.dump(best_model, output_dir / "best_model.joblib")
+    model_path = output_dir / f"{args.target}_best_model.joblib"
+    joblib.dump(best_model, model_path)
 
+    print(f"预测目标: {args.target}")
     print(f"最佳模型: {best_name}")
     print(f"数据划分: 训练集 {len(x_train)} 行, 验证集 {len(x_val)} 行, 测试集 {len(x_test)} 行")
     print(f"自动选择的特征: {', '.join(selected_features)}")
@@ -277,7 +266,7 @@ def main() -> None:
         print(f"{name}: {score * 100:.2f}%")
     print_metrics("验证集达标率", best_val_metrics)
     print_metrics("测试集达标率", test_metrics)
-    print(f"\n模型已保存到: {output_dir / 'best_model.joblib'}")
+    print(f"\n模型已保存到: {model_path}")
 
 
 if __name__ == "__main__":
