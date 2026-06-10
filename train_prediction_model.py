@@ -27,6 +27,7 @@ FEATURE_COLUMNS = [
     "保压时间2",
     "金刚石粒径",
     "金刚石体积分数",
+    "致密度"
 ]
 
 TARGET_COLUMNS = ["致密度", "热导率"]
@@ -42,7 +43,7 @@ def make_selector(random_state: int) -> SelectFromModel:
             random_state=random_state,
             n_jobs=-1,
         ),
-        threshold="median",
+        threshold="0.6*mean",
     )
 
 
@@ -104,7 +105,7 @@ def build_candidates(random_state: int) -> dict[str, Pipeline]:
                 (
                     "model",
                     ExtraTreesRegressor(
-                        n_estimators=800,
+                        n_estimators=1000,
                         random_state=random_state,
                         n_jobs=-1,
                     ),
